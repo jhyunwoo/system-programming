@@ -4,133 +4,133 @@
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/sched.h>
-#include <linux/sched/signal.h>
 #include <linux/pid.h>
-#include <linux/slab.h>
-#include <linux/sort.h>
+#include <linux/sched/signal.h>
+#include <linux/rcupdate.h>
 
-MODUEL_LICENSE("GPL");
+// 커널 모듈의 라이센스와 작성자 정보
+MODULE_LICENSE("GPL");
 MODULE_AUTHOR("JEON Hyunwoo");
 
-#define PROC_NAME "proc_analyzer"
-#define MAX_PROCESSES 1024
+// proc 파일 시스템 파일 이름
+#define PROC_NAME "ancestor"
 
+// 사용자가 입력한 PID를 저장하는 변수
 static pid_t user_specified_pid = 1;
+// 조상 프로세스 포언터
+static struct proc_dir_entry *ancestor_entry;
 
-struct process_info {
-    pit_t process_id;
-    char process_name[TASK_COMM_LEN];
-    unsigned long long virtual_runtime;
-    int cpu_number;
-}
-
-static bool is_descendant(struct task_struct *task_to_check, struct task_struct *ancestor_task){
-    struct task_struct *current_parent = task_to_check;
-
-    while(current_parent && current_parent->pid != 0){
-        if(current_parent == ancestor_task){
-            return true;
-        }
-
-        current_parent = current_parent->real_parent;
-    }
-
-    return false;
-}
-
-static bool is_on_cfs_rq(struct task_struct *task_to_check){
-    int scheduling_policy = task_to_check->policy;
-    if(scheduling_policy != SCHED_NORMAL && scheduling_policy != SCHED_BATCH && scheduling_policy != SCHED_IDLE){
-        return false;
-    }
-
-    if(task_to_check->on_rq > 0){
-        return true;
-    }
-
-    return false;
-}
-
-static int compare_vruntime(const void *first_process, const void *second_process){
-    const struct process_info *first_process_info = (const struct procerss_info *)first_process;
-    const process_info * second_process_info = (const struct process_info *)second_process;
-
-    if(first_process_info -> virtual_runtime < second_process_info -> virtual_runtime){
-        return -1;
-    }else if (first_process_info -> virtual_runtime > second_process_info -> virtual_runtime){
-        return 1;
-    }else{
-        return 0;
-    }
-}
-
-static int proc_analyzer_show(struct seq_file *sequence_file, void *unused){
-    struct task_struct *current_task, &target_task;
+// 파일을 읽을 때 호출되는 함수
+// 지정한 pid의 모든 조상 프로세스를 찾아 출력함
+static int ancestor_show(struct seq_file *sequence_file, void *unused){
+    // 현재 처리 중인 프로세스의 정보를 담은 구조체 모인터, for 문용 변수
+    struct task_struct *current_task, *t;
+    // PID를 나타내는 커널 내부 구조체 포인터
     struct pid *pid_descriptor;
-    struct process_info *cfs_porcess_array;
-    int total_process_count = 0, array_index, cpu_index;
-    int total_cpu_count = num_online_cpus();
-    int *processes_per_cpu;
 
-    cfs_process_array = kmalloc(MAX_PROCESSES * sizeof(struct process_info), GFP_KERNEL);
-    if(!cfs_process_array){
-        seq_printf(sequence_file, "ERROR: Memory allocation failed\n");
-        return 0;
-    }
-
-    process_per_cpu = kzalloc(total_cpu_count * sizeof(int), GFP_KERNEL);
-    if(!process_per_cpu){
-        kfree(cfs_process_array);
-        seq_printf(sequence_file, "ERROR: Memory allocation failed\n");
-        return 0;
-    }
-
+    // 기본 정보 출력
     seq_printf(sequence_file, "ID: 2024148005\n");
     seq_printf(sequence_file, "Name: Jeon, Hyunwoo\n");
-    seq_printf(sequence_file, "PID: %d\n", user_specified_pid);
     seq_printf(sequence_file, "----------------------------------------\n");
 
+    // pid 구조체를 찾고 참조 카운트를 증가시킴
     pid_descriptor = find_get_pid(user_specified_pid);
-    if(!pid_descriptor){
+    if(!pid_descriptor){ // pid를 찾지 못한 경우 처리
         seq_printf(sequence_file, "ERROR: PID not found\n");
-        kfree(cfs_process_array);
-        kfree(processes_per_cpu);
         return 0;
     }
 
-    target_task = pid_task(pid_descriptor, PIDTYPE_PID);
-    if(!target_task){
-        put_pid(pid_descriptor);
-        seq_printf(sequence_file, "ERROR: Task for PID is not found\n")
-        kfree(cfs_process_array);
-        kfree(processes_per_cpu);
+    // pid 구조체에서 실제 프로세스 정보를 가져옴
+    current_task = get_pid_task(pid_descriptor, PIDTYPE_PID);
+    put_pid(pid_descriptor);
+
+    if(!current_task){ // current_task 가 없을 경우 처리
+        seq_printf(sequence_file, "ERROR: Task for PID not found\n");
         return 0;
     }
 
+    // RCU 읽기 잠금 시작
     rcu_read_lock();
 
-    for_each_process(current_task){
-        if(current_task == target_task || is_descendant(current_task, target_task)){
-            if(is_on_cfs_rq(current_task)){
-                if(total_process_count < MAX_PROCESSES){
-                    cfs_process_array[total_process_count].process_id = current_task->pid;
-                    strncpy(cfs_process_array[total_process_count].process_name, current_task -> comm, TASK_COMM_LEN);
-                    cfs_process_arrya[total_process_count].process_name[TASK_COMM_LEN - 1] = '\0';
-                    cfs_process_array[total_process_count].virtual_runtime = current_task -> se.vruntime;
-                    cfs_process_array[total_process_count].cpu_number = task_cpu(current_task);
-                    total_process_count++;
-                }
-            }
-        }
+    // 부모 프로세스를 따라 올라가며 조상 프로세스를 찾음
+    for(t = current_task; t && t -> pid != 0; t = rcu_dereference(t -> real_parent)){
+        char comm[TASK_COMM_LEN];
+        get_task_comm(comm, t);
+        seq_printf(sequence_file, "[%d] %s\n", t -> pid, comm);
     }
 
+    // RCU 읽기 잠금 해제
     rcu_read_unlock();
-    put_pid(pid_descriptor);
-    sort(cfs_process_array, total_process_count, sizeof(struct process_info), compare_vruntime, NULL);
 
-    for(cpu_index = 0; cpu_index < total_cpu_count; cpu_index++){
-        if(processes_per_cpu[cpu_index] > 0){
-            seq_printf(sequence_file, "[CPU #%d Running process: $d\n]", cpu_index, process_per_cpu[cpu_index]);
-        }
-    }
+    put_task_struct(current_task);
+
+    return 0;
 }
+
+// 파일을 열 때 호출되는 함수
+static int ancestor_open(struct inode *inode_ptr, struct file *file_ptr){
+    // ancestor_show를 실제 데이터 출력 함수로 등록
+    return single_open(file_ptr, ancestor_show, NULL);
+}
+
+// 파일을 쓸 때 호출되는 함수
+static ssize_t ancestor_write(struct file *file, const char __user *user_buffer, size_t len, loff_t *file_offset){
+    int tmp;
+    if(len == 0){
+        return -EINVAL;
+    }
+
+    // 사용자의 입력을 정수로 변환
+    if(kstrtoint_from_user(user_buffer, len, 10, &tmp)){
+        return -EINVAL;
+    }
+
+    // 입력이 올바르지 않은 경우 처리
+    if(tmp <= 0){
+        return -EINVAL;
+    }
+
+    // 결과 반환
+    user_specified_pid = (pid_t)tmp;
+    pr_info("ancestor: PID set to %d\n", user_specified_pid);
+    return len;
+}
+
+// proc 파일 시스템 연산 구조체 정의
+static const struct proc_ops ancestor_proc_ops = {
+    .proc_open = ancestor_open,
+    .proc_read = seq_read,
+    .proc_write = ancestor_write,
+    .proc_lseek = seq_lseek,
+    .proc_release = single_release,
+};
+
+// 커널 모듈이 로드될 때 호출되는 함수
+static int __init ancestor_init(void){
+    // 파일 생성
+    ancestor_entry = proc_create(PROC_NAME, 0666, NULL, &ancestor_proc_ops);
+
+    // 파일 생성 실패 처리
+    if(!ancestor_entry){
+        pr_err("Failed to create /proc/ancestor\n");
+        return -ENOMEM;
+    }
+
+    // 로그 출력
+    pr_info("ancestor module loaded. /proc/ancestor created.\n");
+    return 0;
+}
+
+// 커널 모듈이 언로드 될 때 호출되는 함수
+static void __exit ancestor_exit(void){
+    // 파일 삭제
+    if(ancestor_entry){
+        proc_remove(ancestor_entry);
+    }
+
+    // 로그 출력
+    pr_info("ancestor module unloaded. /proc/ancestor removed.\n");
+}
+
+module_init(ancestor_init);
+module_exit(ancestor_exit);

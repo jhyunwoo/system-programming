@@ -260,7 +260,7 @@ static int __init proc_analyzer_init(void){
     }
 
     // 모듈 로드에 성공 메시지
-    pr_info("proc_analyzer module loaded. /proc/%s created.\n", PROC_NAME);
+    pr_info("proc_analyzer module loaded. /proc/proc_analyzer created.\n");
 
     return 0;
 }
@@ -269,7 +269,7 @@ static int __init proc_analyzer_init(void){
 static void __exit proc_analyzer_exit(void){
     // 파일 삭제
     remove_proc_entry(PROC_NAME, NULL);
-    pr_info("proc_analyzer module unloaded. /proc/%s removed.\n", PROC_NAME);
+    pr_info("proc_analyzer module unloaded. /proc/proc_analyzer removed.\n");
 }
 
 module_init(proc_analyzer_init);
